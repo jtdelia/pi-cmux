@@ -1,0 +1,19 @@
+{
+  "name": "pi-cmux",
+  "version": "0.1.0",
+  "description": "Pi extension for cmux terminal integration — notifications, sidebar, splits, and workflow commands",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-coding-agent", "cmux", "terminal"],
+  "pi": { "extensions": ["./extensions/index.ts"] },
+  "files": ["extensions/", "README.md"],
+  "publishConfig": { "access": "public" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*",
+    "typescript": "^5.9.0"
+  }
+}
