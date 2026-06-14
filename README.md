@@ -5,7 +5,7 @@ Pi extension for [cmux](https://www.cmux.dev) terminal integration — notificat
 ## Install
 
 ```bash
-pi install github:jtdelia/pi-cmux
+pi install git:github.com/jtdelia/pi-cmux
 ```
 
 Or load for development:
