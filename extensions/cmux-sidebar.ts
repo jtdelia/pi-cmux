@@ -167,11 +167,12 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	let agentActive = false;
 	let activeToolCount = 0;
 	let cmuxUnavailable = false;
+	let disposed = false;
 	let commandQueue = Promise.resolve();
 	let finalClearTimeout: ReturnType<typeof setTimeout> | undefined;
 
 	const enqueue = (args: string[]): void => {
-		if (cmuxUnavailable) return;
+		if (cmuxUnavailable || disposed) return;
 		commandQueue = commandQueue.then(
 			() => runCmd(args),
 			() => runCmd(args),
@@ -179,10 +180,15 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	};
 
 	const runCmd = async (args: string[]): Promise<void> => {
-		if (cmuxUnavailable) return;
-		const result = await pi.exec("cmux", args, { timeout: CMUX_TIMEOUT_MS });
-		if (result.code !== 0 && (result.stderr.includes("ENOENT") || result.stderr.includes("not found"))) {
-			cmuxUnavailable = true;
+		if (cmuxUnavailable || disposed) return;
+		try {
+			const result = await pi.exec("cmux", args, { timeout: CMUX_TIMEOUT_MS });
+			if (result.code !== 0 && (result.stderr.includes("ENOENT") || result.stderr.includes("not found"))) {
+				cmuxUnavailable = true;
+			}
+		} catch {
+			// Context became stale (session replaced/reloaded) — stop all further operations.
+			disposed = true;
 		}
 	};
 
@@ -225,6 +231,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async () => {
+		if (disposed) return;
 		cancelFinalClear();
 		runState = createEmptyState();
 		tokenTotals = createEmptyTokens();
@@ -235,10 +242,12 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
+		if (disposed) return;
 		runState.prompt = event.prompt?.slice(0, 120);
 	});
 
 	pi.on("agent_start", async () => {
+		if (disposed) return;
 		runSequence++;
 		agentActive = true;
 		cancelFinalClear();
@@ -251,12 +260,14 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async (event) => {
+		if (disposed) return;
 		runState.turnCount = Math.max(runState.turnCount, event.turnIndex + 1);
 		setStatus("running", event.turnIndex > 0 ? `Pi turn ${event.turnIndex + 1}` : "Pi thinking");
 		setProgress(estimateProgress(runState), "Thinking");
 	});
 
 	pi.on("message_end", async (event) => {
+		if (disposed) return;
 		if (!tokenTracking || !isAssistant(event.message)) return;
 		const u = (event.message as AssistantMessageLike).usage;
 		if (!u) return;
@@ -269,6 +280,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", async (event) => {
+		if (disposed) return;
 		activeToolCount++;
 		setStatus("tool", `Pi ${event.toolName}`);
 		setProgress(estimateProgress(runState), event.toolName);
@@ -276,6 +288,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
+		if (disposed) return;
 		runState.toolCount++;
 		if (event.isError) {
 			const path = getPathFromInput(event);
@@ -294,6 +307,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_end", async () => {
+		if (disposed) return;
 		activeToolCount = Math.max(0, activeToolCount - 1);
 		if (agentActive && activeToolCount === 0) {
 			setStatus("running", "Pi thinking");
@@ -302,6 +316,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event) => {
+		if (disposed) return;
 		agentActive = false;
 		activeToolCount = 0;
 		const durationMs = Date.now() - runState.startedAt;
@@ -323,12 +338,12 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		disposed = true;
 		runSequence++;
 		agentActive = false;
 		activeToolCount = 0;
 		cancelFinalClear();
-		clearProgress();
-		clearStatus();
+		// Drain any in-flight commands but don't enqueue new ones (disposed=true guards enqueue/runCmd).
 		await commandQueue.catch(() => {});
 	});
 }
