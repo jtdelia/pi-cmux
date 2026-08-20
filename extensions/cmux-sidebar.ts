@@ -152,6 +152,8 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	if (!envBool("PI_CMUX_SIDEBAR", true) || !hasCmuxContext()) return;
 
 	const statusKey = `pi-cmux-${process.env.CMUX_SURFACE_ID || process.pid}`;
+	const cmuxWorkspaceId = process.env.CMUX_WORKSPACE_ID?.trim();
+	const cmuxSurfaceId = process.env.CMUX_SURFACE_ID?.trim();
 	const source = "pi";
 	const priority = envNumber("PI_CMUX_SIDEBAR_STATUS_PRIORITY", DEFAULT_STATUS_PRIORITY);
 	const thresholdMs = envNumber("PI_CMUX_NOTIFY_THRESHOLD_MS", DEFAULT_COMPLETE_THRESHOLD_MS);
@@ -168,15 +170,26 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 	let activeToolCount = 0;
 	let cmuxUnavailable = false;
 	let disposed = false;
+	let activeCwd: string | undefined;
 	let commandQueue = Promise.resolve();
 	let finalClearTimeout: ReturnType<typeof setTimeout> | undefined;
 
-	const enqueue = (args: string[]): void => {
-		if (cmuxUnavailable || disposed) return;
+	const enqueue = (args: string[]): Promise<void> => {
+		if (cmuxUnavailable || disposed) return Promise.resolve();
 		commandQueue = commandQueue.then(
 			() => runCmd(args),
 			() => runCmd(args),
 		);
+		return commandQueue;
+	};
+
+	const enqueueCmuxRpc = (method: string, params: Record<string, string>): Promise<void> => {
+		if (!cmuxWorkspaceId || !cmuxSurfaceId) return Promise.resolve();
+		return enqueue([
+			"rpc",
+			method,
+			JSON.stringify({ workspace_id: cmuxWorkspaceId, surface_id: cmuxSurfaceId, ...params }),
+		]);
 	};
 
 	const runCmd = async (args: string[]): Promise<void> => {
@@ -188,6 +201,24 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 			}
 		} catch {
 			// Context became stale (session replaced/reloaded) — stop all further operations.
+			disposed = true;
+		}
+	};
+
+	const syncCmuxContext = async (cwd: string): Promise<void> => {
+		if (!cmuxWorkspaceId || !cmuxSurfaceId || disposed) return;
+
+		try {
+			const branchResult = await pi.exec("git", ["branch", "--show-current"], { cwd, timeout: CMUX_TIMEOUT_MS });
+			if (disposed) return;
+			const branch = branchResult.code === 0 ? branchResult.stdout.trim() : "";
+
+			await enqueueCmuxRpc("surface.report_pwd", { path: cwd });
+			if (disposed) return;
+			if (branch) await enqueueCmuxRpc("surface.report_git_branch", { branch });
+			else await enqueueCmuxRpc("surface.clear_git_branch", {});
+		} catch {
+			// The session may have been replaced while reading its cwd or branch.
 			disposed = true;
 		}
 	};
@@ -230,8 +261,9 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 		(finalClearTimeout as any).unref?.();
 	};
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		if (disposed) return;
+		activeCwd = ctx.cwd;
 		cancelFinalClear();
 		runState = createEmptyState();
 		tokenTotals = createEmptyTokens();
@@ -239,6 +271,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 		activeToolCount = 0;
 		clearProgress();
 		clearStatus();
+		await syncCmuxContext(ctx.cwd);
 	});
 
 	pi.on("before_agent_start", async (event) => {
@@ -250,6 +283,7 @@ export default function cmuxSidebarExtension(pi: ExtensionAPI) {
 		if (disposed) return;
 		runSequence++;
 		agentActive = true;
+		if (activeCwd) await syncCmuxContext(activeCwd);
 		cancelFinalClear();
 		runState = createEmptyState(runState.prompt);
 		tokenTotals = createEmptyTokens();
